@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "mitmproxy_grid_java_client",
+  "project_id": "69b14e64-0fb4-487a-8690-68b4adf234e5"
+}
