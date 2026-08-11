@@ -18,6 +18,7 @@ import io.github.ygrip.mitmproxy.grid.client.exception.MitmProxyGridException;
 import io.github.ygrip.mitmproxy.grid.client.exception.MitmProxyGridHttpException;
 import io.github.ygrip.mitmproxy.grid.client.exception.MitmProxyGridTimeoutException;
 import io.github.ygrip.mitmproxy.grid.client.model.MitmProxyCreateInstanceResponse;
+import io.github.ygrip.mitmproxy.grid.client.model.MitmProxyEndpoint;
 import io.github.ygrip.mitmproxy.grid.client.model.MitmProxyHealthResponse;
 import io.github.ygrip.mitmproxy.grid.client.model.MitmProxyInstanceDetail;
 import io.github.ygrip.mitmproxy.grid.client.model.MitmProxyInstanceSummary;
@@ -29,16 +30,6 @@ import io.github.ygrip.mitmproxy.grid.client.model.MitmProxyRuleResponse;
 /**
  * HTTP client for the MitmProxy Grid REST API v2.
  * Thread-safe and stateless — safe to share across tests.
- *
- * <pre>{@code
- * MitmProxyGridClient client = MitmProxyGridClient.builder()
- *     .baseUrl("http://localhost:8090")
- *     .build();
- *
- * client.waitUntilReady(Duration.ofSeconds(30), Duration.ofSeconds(1));
- * MitmProxyCreateInstanceResponse instance = client.createInstance(300);
- * client.createRule(instance.getInstanceId(), MitmProxyRule.disableCaching());
- * }</pre>
  */
 public class MitmProxyGridClient {
 
@@ -68,7 +59,7 @@ public class MitmProxyGridClient {
     return new MitmProxyGridClientBuilder();
   }
 
-  // ── Health ─────────────────────────────────────────────────────────
+  // ── Health / compatibility ─────────────────────────────────────────
 
   public MitmProxyHealthResponse health() {
     String response = sendWithRetry("GET", "health", null);
@@ -78,6 +69,25 @@ public class MitmProxyGridClient {
 
   public String healthRaw() {
     return sendWithRetry("GET", "health", null);
+  }
+
+  /**
+   * Fetch health and require the exact grid/API release supported by this SDK.
+   * Existing callers are not forced into strict checking; invoke this at automation startup
+   * when reproducible grid/client pairing is desired.
+   */
+  public MitmProxyHealthResponse requireCompatibleGrid() {
+    MitmProxyHealthResponse health = health();
+    MitmProxyGridCompatibility.requireCompatible(health);
+    return health;
+  }
+
+  public boolean isCompatibleGrid() {
+    try {
+      return MitmProxyGridCompatibility.isCompatible(health());
+    } catch (MitmProxyGridException e) {
+      return false;
+    }
   }
 
   public boolean isReady() {
@@ -120,6 +130,18 @@ public class MitmProxyGridClient {
 
   public MitmProxyCreateInstanceResponse createInstance() {
     return createInstance(null);
+  }
+
+  /**
+   * Resolve the routable proxy endpoint for either distributed v2.1+ responses or legacy
+   * standalone responses. Distributed responses prefer the worker-advertised endpoint;
+   * legacy responses fall back to this client's configured grid host and returned port.
+   */
+  public MitmProxyEndpoint resolveProxyEndpoint(MitmProxyCreateInstanceResponse instance) {
+    if (instance == null) {
+      throw new IllegalArgumentException("instance must not be null");
+    }
+    return instance.resolveProxyEndpoint(config.baseUri().getHost());
   }
 
   public List<MitmProxyInstanceSummary> listInstances() {
@@ -205,7 +227,6 @@ public class MitmProxyGridClient {
         MitmProxyMessageResponse.class);
   }
 
-  /** Remove all rules from an instance in reverse index order. */
   public void clearAllRules(String instanceId) {
     List<MitmProxyRuleResponse> rules = listRules(instanceId);
     for (int i = rules.size() - 1; i >= 0; i--) {
@@ -227,7 +248,7 @@ public class MitmProxyGridClient {
       try {
         return send(method, path, body);
       } catch (MitmProxyGridHttpException e) {
-        if (e.statusCode() < 500) throw e;  // don't retry 4xx
+        if (e.statusCode() < 500) throw e;
         lastException = e;
       } catch (MitmProxyGridException e) {
         lastException = e;
@@ -259,11 +280,11 @@ public class MitmProxyGridClient {
         .header("Accept", "application/json");
 
     switch (method.toUpperCase()) {
-      case "GET"    -> builder.GET();
+      case "GET" -> builder.GET();
       case "DELETE" -> builder.DELETE();
-      case "POST"   -> builder.POST(publisher);
-      case "PUT"    -> builder.PUT(publisher);
-      case "PATCH"  -> builder.method("PATCH", publisher);
+      case "POST" -> builder.POST(publisher);
+      case "PUT" -> builder.PUT(publisher);
+      case "PATCH" -> builder.method("PATCH", publisher);
       default -> throw new IllegalArgumentException("Unsupported HTTP method: " + method);
     }
 
