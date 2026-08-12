@@ -14,6 +14,10 @@ import lombok.NoArgsConstructor;
 public class MitmProxyInstanceSummary {
   private String instanceId;
   private int port;
+  private String proxyHost;
+  private Integer proxyPort;
+  private String proxyUrl;
+  private String workerId;
   private String status;
   private String createdAt;
   private double uptimeSeconds;

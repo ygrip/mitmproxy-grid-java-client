@@ -1,88 +1,43 @@
 # mitmproxy-grid-java-client
 
-Standalone Java SDK for the [mitmproxy-grid](https://github.com/ygrip/mitmproxy-grid) REST API v2.
+Standalone Java SDK for the [mitmproxy-grid](https://github.com/ygrip/mitmproxy-grid) REST API.
 
-No Selenium, Playwright, Appium, Cucumber, Spring, or Testara dependencies.
+The SDK has no Selenium, Playwright, Appium, Cucumber, Spring, Testcontainers, or Testara dependency.
 
----
+## Compatibility
 
-## Prerequisites
+Client `0.2.0` supports the exact grid release:
 
-This SDK is a client for **mitmproxy-grid** — a custom REST management layer on top of
-[mitmproxy](https://mitmproxy.org/) that runs multiple isolated proxy instances, each on its
-own port, via a single HTTP API. It is **not** compatible with the standard mitmproxy CLI or
-any other proxy server.
-
-### What you need
-
-| Requirement | Details |
-|---|---|
-| [mitmproxy](https://docs.mitmproxy.org/stable/overview-installation/) | `pip install mitmproxy` — tested with mitmproxy 10+ |
-| [mitmproxy-grid](https://github.com/ygrip/mitmproxy-grid) | The custom grid addon server — see setup below |
-| Python 3.11+ | Required by mitmproxy-grid |
-| Java 21+ | Required by this SDK |
-
-### Setting up mitmproxy-grid
-
-Clone and start the grid server:
-
-```bash
-git clone https://github.com/ygrip/mitmproxy-grid.git
-cd mitmproxy-grid
-pip install -r requirements.txt
-python grid.py
+```text
+mitmproxy-grid 2.1.0
+API v2
+ghcr.io/ygrip/mitmproxy-grid:2.1.0
 ```
 
-By default the grid API listens on **port 8090** and allocates proxy instances in the
-**port range 8100–8199**. These are configurable via environment variables:
+The same values are available in code:
 
-```bash
-MITMPROXY_GRID_PORT=8090           # REST API port
-MITMPROXY_GRID_PROXY_PORT_START=8100
-MITMPROXY_GRID_PROXY_PORT_END=8199
-MITMPROXY_GRID_DEFAULT_TTL=300     # seconds
+```java
+MitmProxyGridCompatibility.SUPPORTED_GRID_VERSION; // 2.1.0
+MitmProxyGridCompatibility.SUPPORTED_API_VERSION;  // 2
+MitmProxyGridCompatibility.SUPPORTED_IMAGE;        // ghcr.io/ygrip/mitmproxy-grid:2.1.0
 ```
 
-Verify the server is healthy:
+This lets an automation module pin the exact image without duplicating the version string:
 
-```bash
-curl http://localhost:8090/health
-# {"status":"up","instances":0,"availableSlots":100,...}
+```java
+DockerImageName image = DockerImageName.parse(
+    MitmProxyGridCompatibility.SUPPORTED_IMAGE
+);
 ```
 
-### API version
+Compatibility checking is explicit rather than forced on every request:
 
-This SDK targets **mitmproxy-grid REST API v2**. The required endpoints are:
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/health` | Grid health and capacity |
-| `POST` | `/instances` | Create a proxy instance |
-| `GET` | `/instances` | List all instances |
-| `GET` | `/instances/{id}` | Get instance detail |
-| `DELETE` | `/instances/{id}` | Destroy an instance |
-| `POST` | `/instances/{id}/renew` | Renew instance TTL |
-| `POST` | `/instances/{id}/rules` | Add an interception rule |
-| `GET` | `/instances/{id}/rules` | List rules |
-| `DELETE` | `/instances/{id}/rules/{index}` | Delete a rule by index |
-| `PATCH` | `/instances/{id}/rules/{index}/toggle` | Toggle a rule on/off |
-| `GET` | `/instances/{id}/cert` | Download CA certificate PEM |
-
-### How interception works
-
-```
-Browser / App
-    │
-    └──► mitmproxy instance (port 8101, 8102, …)   ← SDK configures rules here
-              │
-              └──► Target server
+```java
+MitmProxyGridClient client = new MitmProxyGridClient("http://localhost:8090");
+client.requireCompatibleGrid();
 ```
 
-Each test thread creates its own proxy instance (with its own port and isolated rule set)
-through the grid API. Rules are applied to intercepted traffic in real time without
-restarting the proxy.
-
----
+`requireCompatibleGrid()` verifies both grid `2.1.0` and API `2`. Existing applications that do not call it keep the previous tolerant behavior.
 
 ## Installation
 
@@ -90,13 +45,23 @@ restarting the proxy.
 <dependency>
   <groupId>io.github.ygrip</groupId>
   <artifactId>mitmproxy-grid-java-client</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
 </dependency>
 ```
 
----
+## Start the supported grid
 
-## Quick Start
+```bash
+docker run -d \
+  --name mitmproxy-grid \
+  -p 8090:8090 \
+  -p 10000-10100:10000-10100 \
+  ghcr.io/ygrip/mitmproxy-grid:2.1.0
+```
+
+For horizontally scalable Selenium Grid deployments, use the coordinator/worker deployment documented by `mitmproxy-grid` and connect browser nodes to the returned worker proxy endpoint.
+
+## Quick start
 
 ```java
 MitmProxyGridClient client = MitmProxyGridClient.builder()
@@ -106,78 +71,113 @@ MitmProxyGridClient client = MitmProxyGridClient.builder()
     .maxRetries(3)
     .build();
 
-// Wait for the grid to be ready (useful in CI where the server may still be starting)
 client.waitUntilReady(Duration.ofSeconds(30), Duration.ofSeconds(1));
+client.requireCompatibleGrid();
 
-// Create an isolated proxy instance with a 5-minute TTL
 MitmProxyCreateInstanceResponse instance = client.createInstance(300);
-System.out.println("Proxy port: " + instance.getPort()); // e.g. 8101
+MitmProxyEndpoint endpoint = client.resolveProxyEndpoint(instance);
 
-// Add an interception rule
+System.out.println(endpoint.url());
+
 client.createRule(instance.getInstanceId(), MitmProxyRule.mockResponse(
     "api.example.com/users",
     200,
     Map.of("id", 1, "name", "Test User")
 ));
 
-// Point your browser/driver at http://<host>:8101 — rules fire automatically
-
-// After the test: clear rules and destroy the instance
 client.clearAllRules(instance.getInstanceId());
 client.destroyInstance(instance.getInstanceId(), true);
 ```
 
----
+## Distributed proxy endpoints
 
-## Rule Factory Methods
+Grid `2.1.0` can run as a coordinator with multiple proxy workers. In that mode the REST API host and the proxy host are intentionally different.
 
-```java
-// Mock a response with a fixed status and JSON body
-MitmProxyRule.mockResponse("/api/users", 200, Map.of("id", 1))
+A create response can look like:
 
-// Block requests (responds with 403)
-MitmProxyRule.block("/analytics")
-
-// Substring find-and-replace in response body
-MitmProxyRule.replaceResponseBody("/feature-flag", "\"enabled\":false", "\"enabled\":true")
-
-// Substring find-and-replace in request body
-MitmProxyRule.replaceRequestBody("/submit", "staging-id", "prod-id")
-
-// Inject or overwrite request headers
-MitmProxyRule.setRequestHeaders("/api", Map.of("Authorization", "Bearer test-token"))
-
-// Inject or overwrite response headers
-MitmProxyRule.setResponseHeaders("/api", Map.of("X-Feature", "enabled"))
-
-// Append or overwrite URL query parameters
-MitmProxyRule.setQueryParams("/search", Map.of("lang", "en", "page", "1"))
-
-// Strip cache-negotiation headers — apply BEFORE navigating
-MitmProxyRule.disableCaching()                       // all traffic
-MitmProxyRule.disableCaching("static.example.com")  // scoped to URL substring
-
-// Replace a binary asset (image, font, …) with a local file
-MitmProxyRule.replaceImage("/avatar.png", new File("src/test/resources/stub.png"), "image/png")
-MitmProxyRule.replaceImageBase64("/avatar.png", base64EncodedContent, "image/png")
+```json
+{
+  "instanceId": "abc-123",
+  "port": 10003,
+  "proxyHost": "mitm-worker-3",
+  "proxyPort": 10003,
+  "proxyUrl": "http://mitm-worker-3:10003",
+  "workerId": "worker-3",
+  "status": "running",
+  "ttl": 1800,
+  "expiresAt": "2026-08-11T10:00:00Z"
+}
 ```
 
----
+Do not construct a distributed proxy address from the coordinator host plus `port`. Resolve it through the SDK:
 
-## Client Configuration
+```java
+MitmProxyCreateInstanceResponse instance = client.createInstance();
+MitmProxyEndpoint endpoint = client.resolveProxyEndpoint(instance);
+
+String proxyHost = endpoint.host();
+int proxyPort = endpoint.port();
+String proxyUrl = endpoint.url();
+```
+
+For older standalone responses that only contain `port`, `resolveProxyEndpoint()` automatically falls back to the grid API host, preserving the old behavior.
+
+## Testcontainers integration
+
+Testcontainers remains outside this SDK, but an automation project can use the SDK's pinned image constant:
+
+```java
+GenericContainer<?> grid = new GenericContainer<>(
+    DockerImageName.parse(MitmProxyGridCompatibility.SUPPORTED_IMAGE)
+)
+    .withExposedPorts(8090)
+    .waitingFor(Wait.forHttp("/health").forPort(8090));
+```
+
+For a local standalone Testcontainer, expose or bind the proxy range as required by your browser topology. For Selenium Grid at scale, prefer the grid's shared coordinator/worker deployment rather than one grid Testcontainer per Jenkins job.
+
+## Health and compatibility
+
+```java
+MitmProxyHealthResponse health = client.health();
+
+health.getGridVersion(); // 2.1.0
+health.getApiVersion();  // 2
+health.getMode();        // standalone, coordinator, worker
+health.getWorkers();     // coordinator worker list
+
+boolean supported = client.isCompatibleGrid();
+```
+
+## Rule factory methods
+
+```java
+MitmProxyRule.mockResponse("/api/users", 200, Map.of("id", 1));
+MitmProxyRule.block("/analytics");
+MitmProxyRule.replaceResponseBody("/feature-flag", "\"enabled\":false", "\"enabled\":true");
+MitmProxyRule.replaceRequestBody("/submit", "staging-id", "prod-id");
+MitmProxyRule.setRequestHeaders("/api", Map.of("Authorization", "Bearer test-token"));
+MitmProxyRule.setResponseHeaders("/api", Map.of("X-Feature", "enabled"));
+MitmProxyRule.setQueryParams("/search", Map.of("lang", "en", "page", "1"));
+MitmProxyRule.disableCaching();
+MitmProxyRule.disableCaching("static.example.com");
+MitmProxyRule.replaceImage("/avatar.png", new File("src/test/resources/stub.png"), "image/png");
+```
+
+## Client configuration
 
 ```java
 MitmProxyGridClient client = MitmProxyGridClient.builder()
-    .baseUrl("http://localhost:8090")     // mitmproxy-grid API base URL
+    .baseUrl("http://localhost:8090")
     .connectTimeout(Duration.ofSeconds(10))
     .requestTimeout(Duration.ofSeconds(15))
-    .maxRetries(3)                        // retries on 5xx; 4xx are not retried
-    .retryBaseDelay(Duration.ofMillis(500)) // exponential backoff: 500ms, 1s, 2s, …
-    .objectMapper(customObjectMapper)     // optional — bring your own Jackson mapper
+    .maxRetries(3)
+    .retryBaseDelay(Duration.ofMillis(500))
+    .objectMapper(customObjectMapper)
     .build();
 ```
 
-### Configuration defaults
+Defaults:
 
 | Parameter | Default |
 |---|---|
@@ -187,113 +187,60 @@ MitmProxyGridClient client = MitmProxyGridClient.builder()
 | `maxRetries` | 3 |
 | `retryBaseDelay` | 500 ms |
 
----
+## Browser wiring
 
-## File-Based Rules
+Use the resolved endpoint rather than the raw legacy port.
 
-Use `MitmProxyRuleFileSpec` to load rule definitions from JSON files in your test
-resources. Binary files (images, fonts, archives) are automatically base64-encoded.
-
-```java
-// src/test/resources/proxy-rules/mock-avatar.json
-// {
-//   "match": { "urlContains": "avatars.example.com", "responseContentType": "image/" },
-//   "action": { "modifyResponse": { "statusCode": 200 } },
-//   "responseBodyFile": "images/stub-avatar.png"
-// }
-
-MitmProxyRuleFileSpec spec = MitmProxyRuleFileSpec.builder()
-    .match(MitmProxyRuleMatch.builder()
-        .urlContains("avatars.example.com")
-        .responseContentType("image/")
-        .build())
-    .action(MitmProxyRuleAction.builder()
-        .modifyResponse(MitmProxyResponseModification.builder().statusCode(200).build())
-        .build())
-    .responseBodyFile("images/stub-avatar.png")
-    .build();
-
-MitmProxyRule rule = spec.toMitmProxyRule(Path.of("src/test/resources"));
-client.createRule(instanceId, rule);
-```
-
----
-
-## Error Handling
-
-All SDK exceptions extend `MitmProxyGridException` (unchecked).
+### Selenium
 
 ```java
-try {
-    client.createInstance(300);
-} catch (MitmProxyGridHttpException e) {
-    // HTTP-level error — inspect e.statusCode(), e.method(), e.path(), e.responseBody()
-} catch (MitmProxyGridTimeoutException e) {
-    // Request exceeded the configured requestTimeout
-} catch (MitmProxyGridSerializationException e) {
-    // JSON serialization or deserialization failure
-} catch (MitmProxyGridException e) {
-    // Any other SDK-level error (I/O, interrupted, etc.)
-}
-```
-
----
-
-## Browser / Driver Integration
-
-Browser-specific proxy wiring is intentionally outside this SDK. Use the instance port
-returned by `createInstance()` to configure your driver:
-
-**Selenium:**
-```java
-int port = instance.getPort();
+MitmProxyEndpoint endpoint = client.resolveProxyEndpoint(instance);
 Proxy proxy = new Proxy();
-proxy.setHttpProxy("localhost:" + port);
-proxy.setSslProxy("localhost:" + port);
-ChromeOptions options = new ChromeOptions();
-options.setProxy(proxy);
+proxy.setHttpProxy(endpoint.host() + ":" + endpoint.port());
+proxy.setSslProxy(endpoint.host() + ":" + endpoint.port());
 ```
 
-**Playwright:**
+### Playwright
+
 ```java
-int port = instance.getPort();
+MitmProxyEndpoint endpoint = client.resolveProxyEndpoint(instance);
 Browser browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
-    .setProxy(new Proxy("http://localhost:" + port)));
+    .setProxy(new Proxy(endpoint.url())));
 ```
 
-**Appium:**
-```java
-int port = instance.getPort();
-DesiredCapabilities caps = new DesiredCapabilities();
-caps.setCapability("proxyUrl", "http://localhost:" + port);
-```
-
-If you use [Testara](https://github.com/ygrip/testara), `MitmProxySeleniumUtility`,
-`MitmProxyPlaywrightUtility`, and `MitmProxyAppiumUtility` handle this wiring automatically.
-
----
-
-## CA Certificate
-
-Some browsers and mobile devices require trusting the mitmproxy CA to intercept HTTPS.
-Retrieve the PEM for a running instance:
+## CA certificate
 
 ```java
 String pem = client.getCaCertificate(instance.getInstanceId());
-// Install pem into your browser profile or device trust store
 ```
 
----
+## Error handling
+
+All SDK exceptions extend `MitmProxyGridException`.
+
+```java
+try {
+    client.requireCompatibleGrid();
+    client.createInstance(300);
+} catch (MitmProxyGridCompatibilityException e) {
+    // Grid/client version mismatch.
+} catch (MitmProxyGridHttpException e) {
+    // HTTP error.
+} catch (MitmProxyGridTimeoutException e) {
+    // Request timeout.
+} catch (MitmProxyGridException e) {
+    // Other SDK transport/serialization error.
+}
+```
 
 ## Requirements
 
 | Dependency | Version |
 |---|---|
 | Java | 21+ |
-| mitmproxy-grid server | v2 API (see [prerequisites](#prerequisites)) |
-| Jackson Databind | 2.x (transitive) |
-
----
+| mitmproxy-grid | 2.1.0 |
+| mitmproxy-grid API | v2 |
+| Jackson Databind | 2.x transitive |
 
 ## License
 

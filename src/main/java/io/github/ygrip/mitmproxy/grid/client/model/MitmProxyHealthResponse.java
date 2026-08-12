@@ -18,6 +18,12 @@ public class MitmProxyHealthResponse {
   private int availableSlots;
   private String portRange;
   private int defaultTtl;
+  private String gridVersion;
+  private String apiVersion;
+  private String mode;
+  private String workerId;
+  private String proxyHost;
+  private List<MitmProxyWorkerInfo> workers;
 
   public boolean isHealthy() {
     return "up".equalsIgnoreCase(status);
